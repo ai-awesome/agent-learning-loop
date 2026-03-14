@@ -26,7 +26,7 @@ Four modules, each independently usable:
 ## Quick Start
 
 ```bash
-pip install agent-learning-loop
+pip install git+https://github.com/ai-awesome/agent-learning-loop.git
 ```
 
 ```python
