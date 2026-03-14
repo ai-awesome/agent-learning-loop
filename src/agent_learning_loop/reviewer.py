@@ -6,6 +6,11 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_learning_loop.gate import ValidationGate
+    from agent_learning_loop.memory import LessonMemory
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +94,69 @@ class ReviewEngine:
         except Exception:
             logger.exception("ReviewEngine: review generation failed")
             return _fallback(traces, "Review generation failed")
+
+    async def review_and_learn(
+        self,
+        traces: list[dict],
+        memory: LessonMemory,
+        gate: ValidationGate | None = None,
+        date: str = "",
+        extra_context: str = "",
+        context_tags: dict[str, str] | None = None,
+    ) -> dict:
+        """Review a session and store validated lessons in one call.
+
+        Combines review() + optional gate validation + memory storage.
+
+        Args:
+            traces: Execution traces for the session.
+            memory: LessonMemory instance to store accepted lessons.
+            gate: Optional ValidationGate. If provided, lessons are validated
+                  against traces-as-outcomes before storage.
+            date: Date string (YYYY-MM-DD) for the lessons.
+            extra_context: Additional context for the review prompt.
+            context_tags: Context tags to attach to stored lessons.
+
+        Returns:
+            Review dict, with added "stored_lessons" and "rejected_lessons" fields.
+        """
+        from datetime import datetime as _dt
+
+        if not date:
+            date = _dt.now().strftime("%Y-%m-%d")
+
+        review = await self.review(traces, extra_context=extra_context)
+
+        lessons = review.get("lessons", [])
+        if not lessons:
+            review["stored_lessons"] = []
+            review["rejected_lessons"] = []
+            return review
+
+        if gate is not None:
+            # Convert traces to generic outcomes for validation
+            outcomes = [
+                {
+                    "action": t.get("action", ""),
+                    "outcome": t.get("outcome", "unknown"),
+                    "reasoning": t.get("reasoning", ""),
+                }
+                for t in traces
+                if t.get("outcome") in ("success", "failure")
+            ]
+            gate_result = await gate.validate_batch(lessons, outcomes, date=date)
+            accepted = gate_result["accepted"]
+            rejected = gate_result["rejected"]
+        else:
+            accepted = lessons
+            rejected = []
+
+        if accepted:
+            memory.add_lessons(accepted, date=date, context_tags=context_tags)
+
+        review["stored_lessons"] = accepted
+        review["rejected_lessons"] = rejected
+        return review
 
 
 def _parse_json(text: str) -> dict:

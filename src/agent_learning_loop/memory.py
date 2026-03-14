@@ -19,10 +19,13 @@ class LessonMemory:
         text (str), date (str YYYY-MM-DD), context_tags (dict), confidence (float)
 
     Retrieval supports recency decay, context-tag boosting, and confidence weighting.
+    When max_lessons is set, the oldest/lowest-scored lessons are evicted
+    automatically to stay within capacity.
     """
 
-    def __init__(self, path: str = "lessons.json"):
+    def __init__(self, path: str = "lessons.json", max_lessons: int = 0):
         self.path = path
+        self.max_lessons = max_lessons  # 0 = unlimited
         self._lessons: list[dict] = self._load()
 
     # -- Persistence --
@@ -41,6 +44,23 @@ class LessonMemory:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         with open(self.path, "w") as f:
             json.dump(self._lessons, f, indent=2)
+
+    def _evict(self) -> None:
+        """Evict lowest-scored lessons if over capacity."""
+        if self.max_lessons <= 0 or len(self._lessons) <= self.max_lessons:
+            return
+        now = datetime.now().strftime("%Y-%m-%d")
+        ref = datetime.strptime(now, "%Y-%m-%d")
+
+        def score(entry: dict) -> float:
+            days_ago = max(_safe_days_between(ref, entry.get("date", "")), 0)
+            recency = 0.5 ** (days_ago / 30.0)
+            return recency * entry.get("confidence", 0.8)
+
+        self._lessons.sort(key=score, reverse=True)
+        removed = len(self._lessons) - self.max_lessons
+        self._lessons = self._lessons[: self.max_lessons]
+        logger.info("Evicted %d lowest-scored lessons (capacity: %d)", removed, self.max_lessons)
 
     # -- Write operations --
 
@@ -72,6 +92,7 @@ class LessonMemory:
                 }
                 self._lessons.append(entry)
                 existing[text] = entry
+        self._evict()
         self._save()
 
     def initialize_from_seed(self, seed_lessons: list[dict]) -> None:

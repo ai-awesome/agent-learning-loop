@@ -92,3 +92,76 @@ class TestValidateBatch:
         result = await gate.validate_batch([], sample_outcomes)
         assert result["accepted"] == []
         assert result["rejected"] == []
+
+
+class TestSynonymMatching:
+    @pytest.mark.asyncio
+    async def test_synonym_expands_matching(self):
+        """Lesson says 'momentum' but outcomes say 'trend' — synonym should match."""
+        gate = ValidationGate(
+            synonyms={"momentum": ["trend", "breakout", "rally"]},
+        )
+        outcomes = [
+            {"action": "followed trend signal", "outcome": "success", "reasoning": "trend was strong and sustained"},
+            {"action": "followed trend signal", "outcome": "success", "reasoning": "breakout confirmed by volume"},
+            {"action": "ignored trend signal", "outcome": "failure", "reasoning": "missed the rally completely"},
+            {"action": "checked logs", "outcome": "success", "reasoning": "logs showed healthy state"},
+            {"action": "ran diagnostics", "outcome": "success", "reasoning": "system stable"},
+        ]
+        result = await gate.validate("momentum signals are reliable", outcomes)
+        assert result["matching_outcomes"] > 0
+        assert result["match_confidence"] > 0
+
+    @pytest.mark.asyncio
+    async def test_no_synonyms_misses_match(self):
+        """Without synonyms, 'momentum' won't match 'trend'."""
+        gate = ValidationGate()  # no synonyms
+        outcomes = [
+            {"action": "followed trend", "outcome": "success", "reasoning": "trend was strong"},
+            {"action": "followed trend", "outcome": "success", "reasoning": "breakout confirmed"},
+            {"action": "ignored trend", "outcome": "failure", "reasoning": "missed rally"},
+            {"action": "checked logs", "outcome": "success", "reasoning": "logs healthy"},
+            {"action": "ran diagnostics", "outcome": "success", "reasoning": "stable"},
+        ]
+        result = await gate.validate("momentum signals are reliable", outcomes)
+        assert result["matching_outcomes"] == 0
+
+
+class TestCategoryMatching:
+    @pytest.mark.asyncio
+    async def test_category_entities_match(self):
+        """Lesson mentions 'React', outcome mentions 'Vue' — both 'frontend' category.
+        Category match (1pt) + keyword overlap on 'component'/'testing' (3pt each) exceeds threshold."""
+        gate = ValidationGate(
+            entity_categories={"frontend": ["react", "vue", "angular"]},
+        )
+        outcomes = [
+            {"action": "refactored vue component", "outcome": "success", "reasoning": "vue component testing improved after refactor"},
+            {"action": "refactored vue component", "outcome": "success", "reasoning": "vue component testing coverage increased"},
+            {"action": "updated backend", "outcome": "failure", "reasoning": "backend migration broke"},
+            {"action": "fixed api", "outcome": "success", "reasoning": "api endpoint restored"},
+            {"action": "deployed service", "outcome": "success", "reasoning": "deployment smooth"},
+        ]
+        result = await gate.validate("react components need more testing", outcomes)
+        # react and vue are both in 'frontend' category, plus 'component'/'testing' overlap
+        assert result["matching_outcomes"] > 0
+
+
+class TestMatchConfidence:
+    @pytest.mark.asyncio
+    async def test_confidence_in_result(self, sample_outcomes):
+        gate = ValidationGate()
+        result = await gate.validate(
+            "retry transient errors with backoff strategy",
+            sample_outcomes,
+        )
+        assert "match_confidence" in result
+
+    @pytest.mark.asyncio
+    async def test_no_match_zero_confidence(self, sample_outcomes):
+        gate = ValidationGate()
+        result = await gate.validate(
+            "optimize database connection pooling",
+            sample_outcomes,
+        )
+        assert result["match_confidence"] == 0.0

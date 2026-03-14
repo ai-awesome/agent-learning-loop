@@ -33,20 +33,20 @@ pip install git+https://github.com/ai-awesome/agent-learning-loop.git
 from agent_learning_loop import LessonMemory, ReviewEngine, ValidationGate
 
 # Initialize
-memory = LessonMemory("lessons.json")
+memory = LessonMemory("lessons.json", max_lessons=30)  # auto-evicts lowest-scored when full
 reviewer = ReviewEngine(llm_fn=your_llm_call)  # any async (prompt, system) -> str
-gate = ValidationGate()
+gate = ValidationGate(
+    synonyms={"refactor": ["restructure", "rewrite", "simplify"]},
+    entity_categories={"frontend": ["react", "vue", "angular"]},
+)
 
-# After a work session — review and learn
+# After a work session — review, validate, and store in one call
 traces = [
     {"action": "refactored auth module", "outcome": "success", "reasoning": "reduced complexity"},
     {"action": "changed DB schema", "outcome": "failure", "reasoning": "forgot to update ORM models"},
 ]
-review = await reviewer.review(traces)
-
-# Validate lessons against history, then store
-validated = await gate.validate_batch(review["lessons"], historical_outcomes)
-memory.add_lessons(validated["accepted"], date="2026-03-14")
+result = await reviewer.review_and_learn(traces, memory=memory, gate=gate, date="2026-03-14")
+# result contains: summary, lessons, stored_lessons, rejected_lessons, grade, ...
 
 # Before next session — inject into prompt
 context = memory.format_for_prompt()
@@ -60,7 +60,7 @@ prompt = f"Lessons from past sessions:\n{context}\n\nNow proceed with the task..
 Persistent lesson store with weighted retrieval. JSON file-backed — no database needed.
 
 ```python
-memory = LessonMemory("lessons.json")
+memory = LessonMemory("lessons.json", max_lessons=30)
 
 # Add lessons (auto-deduplicates, filters dangerous content)
 memory.add_lessons(["validate input before processing"], date="2026-03-14")
@@ -107,6 +107,19 @@ review = await reviewer.review(traces, extra_context="CPU was at 95% during sess
 # Returns: {summary, what_worked, what_failed, lessons, grade, next_focus}
 ```
 
+One-call review + validate + store:
+
+```python
+result = await reviewer.review_and_learn(
+    traces,
+    memory=memory,
+    gate=gate,          # optional — skip to accept all lessons
+    date="2026-03-14",
+    context_tags={"env": "production"},
+)
+# result["stored_lessons"], result["rejected_lessons"]
+```
+
 Custom prompt templates:
 
 ```python
@@ -119,10 +132,14 @@ reviewer = ReviewEngine(
 
 ### ValidationGate
 
-Validates lessons against historical outcomes using keyword matching. No LLM call needed.
+Validates lessons against historical outcomes. Supports synonym expansion and category/entity mapping for precise matching. Confidence is tiered: exact keyword (3) > synonym (2) > category (1). No LLM call needed.
 
 ```python
-gate = ValidationGate(min_keyword_overlap=2)
+gate = ValidationGate(
+    min_keyword_overlap=2,
+    synonyms={"refactor": ["restructure", "rewrite", "simplify"]},
+    entity_categories={"frontend": ["react", "vue", "angular"]},
+)
 
 # Single lesson
 result = await gate.validate("use canary deployments", historical_outcomes)

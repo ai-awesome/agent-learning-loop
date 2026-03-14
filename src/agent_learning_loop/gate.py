@@ -38,12 +38,36 @@ def _extract_keywords(text: str) -> set[str]:
 class ValidationGate:
     """Validates lessons against historical outcomes using keyword matching.
 
+    Supports synonym expansion and category/entity mapping for higher
+    matching precision. Matching confidence is tiered:
+    exact keyword (3) > synonym (2) > category (1).
+
     Lessons that predominantly match failure outcomes are rejected.
     No LLM call needed — pure heuristic.
     """
 
-    def __init__(self, min_keyword_overlap: int = 2):
+    def __init__(
+        self,
+        min_keyword_overlap: int = 2,
+        synonyms: dict[str, list[str]] | None = None,
+        entity_categories: dict[str, list[str]] | None = None,
+    ):
         self.min_keyword_overlap = min_keyword_overlap
+        # synonyms: {"momentum": ["trend", "breakout", "rally"]}
+        self._synonym_map: dict[str, str] = {}
+        if synonyms:
+            for canonical, alts in synonyms.items():
+                canonical_l = canonical.lower()
+                for alt in alts:
+                    self._synonym_map[alt.lower()] = canonical_l
+                self._synonym_map[canonical_l] = canonical_l
+        # entity_categories: {"energy": ["XOM", "CVX"], "frontend": ["React", "Vue"]}
+        self._category_map: dict[str, str] = {}
+        if entity_categories:
+            for category, entities in entity_categories.items():
+                cat_l = category.lower()
+                for entity in entities:
+                    self._category_map[entity.lower()] = cat_l
 
     async def validate(
         self,
@@ -85,25 +109,33 @@ class ValidationGate:
                 "baseline_success_rate": baseline,
                 "projected_success_rate": baseline,
                 "matching_outcomes": 0,
+                "match_confidence": 0.0,
                 "reason": "no extractable keywords in lesson",
             }
 
         matching_success: list[dict] = []
         matching_failure: list[dict] = []
+        total_confidence = 0.0
+        match_count = 0
 
         for outcome in historical_outcomes:
             reasoning = outcome.get("reasoning", "")
             action = outcome.get("action", "")
             outcome_keywords = _extract_keywords(f"{action} {reasoning}")
 
-            overlap = lesson_keywords & outcome_keywords
-            if len(overlap) >= self.min_keyword_overlap:
+            confidence = self._compute_match_confidence(
+                lesson_keywords, outcome_keywords
+            )
+            if confidence > 0:
+                total_confidence += confidence
+                match_count += 1
                 if outcome.get("outcome") == "success":
                     matching_success.append(outcome)
                 else:
                     matching_failure.append(outcome)
 
         total_matching = len(matching_success) + len(matching_failure)
+        avg_confidence = (total_confidence / match_count) if match_count else 0.0
 
         if total_matching == 0:
             return {
@@ -111,6 +143,7 @@ class ValidationGate:
                 "baseline_success_rate": baseline,
                 "projected_success_rate": baseline,
                 "matching_outcomes": 0,
+                "match_confidence": 0.0,
                 "reason": "lesson does not match any historical outcomes",
             }
 
@@ -134,8 +167,54 @@ class ValidationGate:
             "baseline_success_rate": baseline,
             "projected_success_rate": projected,
             "matching_outcomes": total_matching,
+            "match_confidence": round(avg_confidence, 2),
             "reason": reason,
         }
+
+    def _compute_match_confidence(
+        self, lesson_kw: set[str], outcome_kw: set[str]
+    ) -> float:
+        """Compute tiered match confidence between keyword sets.
+
+        Scoring: exact keyword overlap (3) > synonym match (2) > category match (1).
+        Returns 0.0 if total score < min_keyword_overlap threshold.
+        """
+        score = 0.0
+
+        # Exact overlap
+        exact = lesson_kw & outcome_kw
+        score += len(exact) * 3.0
+
+        # Synonym matching
+        if self._synonym_map:
+            lesson_canonical = {
+                self._synonym_map.get(w, w) for w in lesson_kw
+            }
+            outcome_canonical = {
+                self._synonym_map.get(w, w) for w in outcome_kw
+            }
+            synonym_matches = (lesson_canonical & outcome_canonical) - exact
+            score += len(synonym_matches) * 2.0
+
+        # Category matching
+        if self._category_map:
+            lesson_cats = {
+                self._category_map[w] for w in lesson_kw if w in self._category_map
+            }
+            outcome_cats = {
+                self._category_map[w] for w in outcome_kw if w in self._category_map
+            }
+            category_matches = lesson_cats & outcome_cats
+            score += len(category_matches) * 1.0
+
+        # Threshold: need at least min_keyword_overlap worth of score
+        # (exact match = 3 per keyword, so 1 exact match exceeds overlap=2)
+        if score < self.min_keyword_overlap:
+            return 0.0
+
+        # Normalize to 0-1 range (cap at 1.0)
+        max_possible = max(len(lesson_kw), 1) * 3.0
+        return min(score / max_possible, 1.0)
 
     async def validate_batch(
         self,

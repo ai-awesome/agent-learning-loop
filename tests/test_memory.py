@@ -126,6 +126,34 @@ class TestSeedAndPersistence:
         assert not mem.is_empty()
 
 
+class TestCapacityAndEviction:
+    def test_no_cap_by_default(self, lessons_path):
+        mem = LessonMemory(lessons_path)
+        for i in range(50):
+            mem.add_lessons([f"lesson {i}"], date="2026-03-14")
+        assert len(mem.get_all()) == 50
+
+    def test_evicts_lowest_scored(self, lessons_path):
+        mem = LessonMemory(lessons_path, max_lessons=3)
+        # Add old low-confidence lessons
+        mem.add_lessons(["old weak A"], date="2025-01-01", confidence=0.3)
+        mem.add_lessons(["old weak B"], date="2025-01-02", confidence=0.3)
+        # Add recent high-confidence lessons
+        mem.add_lessons(["new strong C"], date="2026-03-14", confidence=0.9)
+        mem.add_lessons(["new strong D"], date="2026-03-14", confidence=0.95)
+        # Should keep 3, evict the weakest
+        assert len(mem.get_all()) == 3
+        texts = {e["text"] for e in mem.get_all()}
+        assert "new strong C" in texts
+        assert "new strong D" in texts
+
+    def test_cap_zero_means_unlimited(self, lessons_path):
+        mem = LessonMemory(lessons_path, max_lessons=0)
+        for i in range(20):
+            mem.add_lessons([f"lesson {i}"], date="2026-03-14")
+        assert len(mem.get_all()) == 20
+
+
 class TestSanitizerIntegration:
     def test_suspicious_lessons_filtered(self, lessons_path):
         mem = LessonMemory(lessons_path)

@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from agent_learning_loop.gate import ValidationGate
+from agent_learning_loop.memory import LessonMemory
 from agent_learning_loop.reviewer import ReviewEngine
 
 
@@ -114,3 +116,63 @@ class TestReview:
         engine = ReviewEngine(llm_fn=mock_llm_valid)
         result = await engine.review([])
         assert "summary" in result
+
+
+class TestReviewAndLearn:
+    @pytest.mark.asyncio
+    async def test_stores_lessons_in_memory(self, lessons_path, sample_traces):
+        engine = ReviewEngine(llm_fn=mock_llm_valid)
+        memory = LessonMemory(lessons_path)
+        result = await engine.review_and_learn(
+            sample_traces, memory=memory, date="2026-03-14"
+        )
+        assert len(result["stored_lessons"]) == 1
+        assert result["stored_lessons"][0] == "Always run migrations in staging first"
+        assert not memory.is_empty()
+
+    @pytest.mark.asyncio
+    async def test_with_gate_validation(self, lessons_path, sample_traces):
+        engine = ReviewEngine(llm_fn=mock_llm_valid)
+        memory = LessonMemory(lessons_path)
+        gate = ValidationGate()
+        result = await engine.review_and_learn(
+            sample_traces, memory=memory, gate=gate, date="2026-03-14"
+        )
+        assert "stored_lessons" in result
+        assert "rejected_lessons" in result
+        total = len(result["stored_lessons"]) + len(result["rejected_lessons"])
+        assert total == 1  # one lesson from mock_llm_valid
+
+    @pytest.mark.asyncio
+    async def test_no_lessons_stores_nothing(self, lessons_path, sample_traces):
+        async def llm_no_lessons(prompt, system_prompt):
+            return json.dumps({
+                "summary": "Nothing happened.",
+                "what_worked": [],
+                "what_failed": [],
+                "lessons": [],
+                "grade": "N/A",
+                "next_focus": "",
+            })
+
+        engine = ReviewEngine(llm_fn=llm_no_lessons)
+        memory = LessonMemory(lessons_path)
+        result = await engine.review_and_learn(
+            sample_traces, memory=memory, date="2026-03-14"
+        )
+        assert result["stored_lessons"] == []
+        assert memory.is_empty()
+
+    @pytest.mark.asyncio
+    async def test_context_tags_passed_to_memory(self, lessons_path, sample_traces):
+        engine = ReviewEngine(llm_fn=mock_llm_valid)
+        memory = LessonMemory(lessons_path)
+        await engine.review_and_learn(
+            sample_traces,
+            memory=memory,
+            date="2026-03-14",
+            context_tags={"env": "staging"},
+        )
+        stored = memory.get_all()
+        assert len(stored) == 1
+        assert stored[0]["context_tags"] == {"env": "staging"}
